@@ -9,7 +9,14 @@ Prerequisites:
 * Go (`brew install go`)
 
 ```shell
-$ go install github.com/tmc/smol-dev-go@main
+$ go install github.com/tmc/smol-dev-go@master
+```
+
+This will place `smol-dev-go` into `~/go/bin/`.
+
+Alternatively, you can run it directly via:
+```shell
+$ go run github.com/tmc/smol-dev-go@master
 ```
 
 ### Options
