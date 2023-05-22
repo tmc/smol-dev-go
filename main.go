@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"gopkg.in/yaml.v3"
 
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/prompts"
@@ -56,7 +57,7 @@ func run() error {
 		return err
 	}
 
-	sharedDepsYaml, err := json.MarshalIndent(sharedDeps.SharedDependencies, "", "  ")
+	sharedDepsYaml, err := yaml.Marshal(sharedDeps.SharedDependencies)
 	if err := os.WriteFile(pathInTargetDir("shared_dependencies.md"), sharedDepsYaml, 0644); err != nil {
 		return fmt.Errorf("failed to write shared dependencies: %w", err)
 	}
