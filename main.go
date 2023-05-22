@@ -100,7 +100,7 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 
 type sharedDependenciesLLMResponse struct {
 	Reasoning          []string `json:"reasoning"`
-	SharedDependencies string   `json:"shared_dependencies"`
+	SharedDependencies []string `json:"shared_dependencies"`
 }
 
 func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDependenciesLLMResponse, error) {
