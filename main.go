@@ -169,7 +169,7 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 	//defer spin(msg, "wrote files")()
 	ctx := context.Background()
 	spt := prompts.NewPromptTemplate(codeGenerationSystemPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
-	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies", "file_path"})
+	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies", "filename"})
 	llm, err := openai.New()
 	if err != nil {
 		return "", fmt.Errorf("failed to create llm: %w", err)
@@ -178,7 +178,7 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 		"prompt":              prompt,
 		"filepaths_string":    filePaths,
 		"shared_dependencies": sharedDeps,
-		"file_path":           file,
+		"filename":            file,
 	}
 	systemPrompt, err := spt.Format(inputs)
 	if err != nil {
@@ -275,7 +275,7 @@ Now your job is to generate only the code for the file {{.filename}}.
 Make sure to have consistent filenames if you reference other files we are also generating.
 
 Remember that you must obey 3 things:
-   - you are generating code for the file {{filename}}
+   - you are generating code for the file {{.filename}}
    - do not stray from the names of the files and the shared dependencies we have decided on
    - MOST IMPORTANT OF ALL - the purpose of our app is {{.prompt}} - every line of code you generate must be valid code. Do not include code fences in your response, for example
 
