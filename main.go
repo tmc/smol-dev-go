@@ -56,7 +56,7 @@ func run() error {
 		return err
 	}
 
-	sharedDepsYaml, err := json.MarshalIndent(sharedDeps, "", "  ")
+	sharedDepsYaml, err := json.MarshalIndent(sharedDeps.SharedDependencies, "", "  ")
 	if err := os.WriteFile(pathInTargetDir("shared_dependencies.md"), sharedDepsYaml, 0644); err != nil {
 		return fmt.Errorf("failed to write shared dependencies: %w", err)
 	}
@@ -114,7 +114,6 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 	defer fmt.Println()
 	defer spin("generating file list", "finished generating file list")()
 	ctx := context.Background()
-	//pt := prompts.NewPromptTemplate(filesPathsPrompt, []string{"prompt"})
 	llm, err := openai.New(openai.WithModel(*flagModel))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create llm: %w", err)
@@ -185,6 +184,10 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 		return "", fmt.Errorf("failed to format system prompt: %w", err)
 	}
 	genPrompt, err := pt.Format(inputs)
+	if err != nil {
+		return "", fmt.Errorf("failed to format prompt: %w", err)
+	}
+
 	generation, err := llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: systemPrompt},
 		&schema.HumanChatMessage{Text: genPrompt},
