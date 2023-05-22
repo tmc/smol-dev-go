@@ -23,7 +23,7 @@ var (
 	flagPrompt      = flag.String("prompt", "", "prompt to use (can be a filename)")
 	flagModel       = flag.String("model", "gpt-4", "model to use")
 	flagTargetDir   = flag.String("target-dir", "", "target directory to write files to")
-	flagConcurrency = flag.Int("concurrency", 2, "number of concurrent files to generate")
+	flagConcurrency = flag.Int("concurrency", 5, "number of concurrent files to generate")
 	flagVerbose     = flag.Bool("verbose", false, "verbose output")
 )
 
@@ -39,10 +39,6 @@ func run() error {
 	prompt, err := readPrompt()
 	if err != nil {
 		return err
-	}
-
-	if *flagVerbose {
-		fmt.Println("prompt:", prompt)
 	}
 
 	filePathsResult, err := runFilePathsLLMCall(prompt)
@@ -200,6 +196,10 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 }
 
 func pathInTargetDir(path string) string {
+	// ensure target dir exists:
+	if err := os.MkdirAll(*flagTargetDir, 0755); err != nil {
+		panic(fmt.Errorf("failed to create target directory %v: %w", *flagTargetDir, err))
+	}
 	return filepath.Join(*flagTargetDir, path)
 }
 
