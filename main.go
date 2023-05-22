@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/tmc/langchaingo/chains"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/prompts"
@@ -15,8 +17,10 @@ import (
 )
 
 var (
-	flagPrompt = flag.String("prompt", "", "prompt to use (can be a filename)")
-	flagModel  = flag.String("model", "gpt-4", "model to use")
+	flagPrompt      = flag.String("prompt", "", "prompt to use (can be a filename)")
+	flagModel       = flag.String("model", "gpt-4", "model to use")
+	flagTargetDir   = flag.String("target-dir", "", "target directory to write files to")
+	flagConcurrency = flag.Int("concurrency", 4, "number of concurrent files to generate")
 )
 
 func main() {
@@ -36,39 +40,43 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("filePathsResult: %+v\n", filePathsResult)
 
 	sharedDeps, err := runSharedDependenciesLLMCall(prompt, filePathsResult.Filepaths)
 	if err != nil {
 		return err
 	}
 	sharedDepsYaml, err := json.MarshalIndent(sharedDeps, "", "  ")
-	if err := os.WriteFile("shared_dependencies.md", sharedDepsYaml, 0644); err != nil {
+	if err := os.WriteFile(pathInTargetDir("shared_dependencies.md"), sharedDepsYaml, 0644); err != nil {
 		return fmt.Errorf("failed to write shared dependencies: %w", err)
 	}
-	fmt.Println(sharedDeps)
+
+	g := new(errgroup.Group)
+	g.SetLimit(*flagConcurrency)
 
 	// generate all files:
-	for _, fp := range filePathsResult.Filepaths {
-		fmt.Println(fp)
+	for i, fp := range filePathsResult.Filepaths {
+		i := i
+		fp := pathInTargetDir(fp)
+		g.Go(func() error {
+			msg := fmt.Sprintf("Generating file %v of %v: %v", i+1, len(filePathsResult.Filepaths), fp)
 
-		// call codegen LLM:
-		src, err := runCodeGenLLMCall(prompt, fp, string(sharedDepsYaml), filePathsResult.Filepaths)
-		if err != nil {
-			return fmt.Errorf("failed to run codegen LLM call for %v: %w", fp, err)
-		}
-
-		// ensure directory exists:
-		if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
-			return fmt.Errorf("failed to create directory %v: %w", filepath.Dir(fp), err)
-		}
-		// write file:
-		if err := os.WriteFile(fp, []byte(src), 0644); err != nil {
-			return fmt.Errorf("failed to write file %v: %w", fp, err)
-		}
+			// call codegen LLM:
+			src, err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filePathsResult.Filepaths)
+			if err != nil {
+				return fmt.Errorf("failed to run codegen LLM call for %v: %w", fp, err)
+			}
+			// ensure directory exists:
+			if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
+				return fmt.Errorf("failed to create directory %v: %w", filepath.Dir(fp), err)
+			}
+			// write file:
+			if err := os.WriteFile(fp, []byte(src), 0644); err != nil {
+				return fmt.Errorf("failed to write file %v: %w", fp, err)
+			}
+			return nil
+		})
 	}
-
-	return nil
+	return g.Wait()
 }
 
 type filepathLLMResponse struct {
@@ -77,7 +85,7 @@ type filepathLLMResponse struct {
 }
 
 func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
-	defer spin("generate file paths")()
+	defer spin("generating file paths")()
 	ctx := context.Background()
 	//pt := prompts.NewPromptTemplate(filesPathsPrompt, []string{"prompt"})
 	llm, err := openai.New(openai.WithModel(*flagModel))
@@ -129,8 +137,8 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 	return result, nil
 }
 
-func runCodeGenLLMCall(prompt, file, sharedDeps string, filePaths []string) (string, error) {
-	defer spin(fmt.Sprintf("generate %v", file))()
+func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string) (string, error) {
+	defer spin(msg)()
 	ctx := context.Background()
 	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
 	llm, err := openai.New()
@@ -144,8 +152,11 @@ func runCodeGenLLMCall(prompt, file, sharedDeps string, filePaths []string) (str
 		"shared_dependencies": sharedDeps,
 	}
 	result, err := chains.Call(ctx, smolDevGo, inputs)
-	fmt.Println(result)
 	return result["text"].(string), err
+}
+
+func pathInTargetDir(path string) string {
+	return filepath.Join(*flagTargetDir, path)
 }
 
 func readPrompt() (string, error) {
