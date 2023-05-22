@@ -7,20 +7,24 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/tmc/langchaingo/chains"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/prompts"
 	"github.com/tmc/langchaingo/schema"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 var (
 	flagPrompt      = flag.String("prompt", "", "prompt to use (can be a filename)")
 	flagModel       = flag.String("model", "gpt-4", "model to use")
 	flagTargetDir   = flag.String("target-dir", "", "target directory to write files to")
-	flagConcurrency = flag.Int("concurrency", 4, "number of concurrent files to generate")
+	flagConcurrency = flag.Int("concurrency", 2, "number of concurrent files to generate")
+	flagVerbose     = flag.Bool("verbose", false, "verbose output")
 )
 
 func main() {
@@ -36,29 +40,53 @@ func run() error {
 	if err != nil {
 		return err
 	}
+
+	if *flagVerbose {
+		fmt.Println("prompt:", prompt)
+	}
+
 	filePathsResult, err := runFilePathsLLMCall(prompt)
 	if err != nil {
 		return err
+	}
+
+	if *flagVerbose {
+		y, _ := json.MarshalIndent(filePathsResult, "", "  ")
+		fmt.Println(string(y))
 	}
 
 	sharedDeps, err := runSharedDependenciesLLMCall(prompt, filePathsResult.Filepaths)
 	if err != nil {
 		return err
 	}
+
 	sharedDepsYaml, err := json.MarshalIndent(sharedDeps, "", "  ")
 	if err := os.WriteFile(pathInTargetDir("shared_dependencies.md"), sharedDepsYaml, 0644); err != nil {
 		return fmt.Errorf("failed to write shared dependencies: %w", err)
 	}
+	if *flagVerbose {
+		fmt.Println(string(sharedDepsYaml))
+	}
 
 	g := new(errgroup.Group)
 	g.SetLimit(*flagConcurrency)
-
 	// generate all files:
+
+	progressBars := mpb.New()
 	for i, fp := range filePathsResult.Filepaths {
 		i := i
 		fp := pathInTargetDir(fp)
 		g.Go(func() error {
-			msg := fmt.Sprintf("Generating file %v of %v: %v", i+1, len(filePathsResult.Filepaths), fp)
+			msg := fmt.Sprintf("generating file %v of %v: %v", i+1, len(filePathsResult.Filepaths), fp)
+			bar := progressBars.AddBar(1, mpb.PrependDecorators(
+				decor.Name(msg),
+			),
+				mpb.AppendDecorators(
+					decor.OnComplete(decor.Spinner(nil), "✅"),
+				),
+				mpb.BarNoPop(),
+			)
+			defer bar.SetCurrent(1)
 
 			// call codegen LLM:
 			src, err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filePathsResult.Filepaths)
@@ -75,7 +103,9 @@ func run() error {
 			}
 			return nil
 		})
+		time.Sleep(time.Millisecond)
 	}
+	progressBars.Wait()
 	return g.Wait()
 }
 
@@ -85,7 +115,8 @@ type filepathLLMResponse struct {
 }
 
 func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
-	defer spin("generating file paths")()
+	defer fmt.Println()
+	defer spin("generating file list", "finished generating file list")()
 	ctx := context.Background()
 	//pt := prompts.NewPromptTemplate(filesPathsPrompt, []string{"prompt"})
 	llm, err := openai.New(openai.WithModel(*flagModel))
@@ -100,7 +131,7 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 		return nil, fmt.Errorf("failed to chat: %w", err)
 	}
 	result := &filepathLLMResponse{}
-	if err = json.Unmarshal([]byte(cr.Message.Text), result); err != nil {
+	if err = json.Unmarshal(findJSON(cr.Message.Text), result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, cr.Message.Text)
 	}
 	return result, nil
@@ -112,7 +143,8 @@ type sharedDependenciesLLMResponse struct {
 }
 
 func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDependenciesLLMResponse, error) {
-	defer spin("generate dependencies list")()
+	defer fmt.Println()
+	defer spin("generate dependencies list", "finished generating")()
 	ctx := context.Background()
 	pt := prompts.NewPromptTemplate(sharedDependenciesPrompt, []string{"prompt", "filepaths_string"})
 	llm, err := openai.New(openai.WithModel(*flagModel))
@@ -131,28 +163,40 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 		&schema.SystemChatMessage{Text: systemPrompt},
 	})
 	result := &sharedDependenciesLLMResponse{}
-	if err = json.Unmarshal([]byte(generation.Message.Text), result); err != nil {
+	if err = json.Unmarshal(findJSON(generation.Message.Text), result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, generation.Message.Text)
 	}
 	return result, nil
 }
 
 func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string) (string, error) {
-	defer spin(msg)()
+	//defer spin(msg, "wrote files")()
 	ctx := context.Background()
-	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
+	spt := prompts.NewPromptTemplate(codeGenerationSystemPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
+	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies", "file_path"})
 	llm, err := openai.New()
 	if err != nil {
 		return "", fmt.Errorf("failed to create llm: %w", err)
 	}
-	smolDevGo := chains.NewLLMChain(llm, pt)
 	inputs := map[string]interface{}{
-		"prompt":              "smol-dev-go: a go program to assist with program development",
+		"prompt":              prompt,
 		"filepaths_string":    filePaths,
 		"shared_dependencies": sharedDeps,
+		"file_path":           file,
 	}
-	result, err := chains.Call(ctx, smolDevGo, inputs)
-	return result["text"].(string), err
+	systemPrompt, err := spt.Format(inputs)
+	if err != nil {
+		return "", fmt.Errorf("failed to format system prompt: %w", err)
+	}
+	genPrompt, err := pt.Format(inputs)
+	generation, err := llm.Chat(ctx, []schema.ChatMessage{
+		&schema.SystemChatMessage{Text: systemPrompt},
+		&schema.HumanChatMessage{Text: genPrompt},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to chat: %w", err)
+	}
+	return generation.Message.Text, nil
 }
 
 func pathInTargetDir(path string) string {
@@ -174,16 +218,22 @@ func readPrompt() (string, error) {
 	return *flagPrompt, nil
 }
 
+// extracts a json string from a string
+func findJSON(s string) []byte {
+	re := regexp.MustCompile(`(?s)\{.*\}`)
+	return re.Find([]byte(s))
+}
+
 const filesPathsPrompt = `
 You are an AI developer who is trying to write a program that will generate code for the user based on their intent.
 
-Tips: include a Makefile and a Dockerfile
-
-When given their intent, create a complete, exhaustive list of filepaths that the user would write to make the program.
+When given their intent, create a complete, exhaustive list of filepaths that the user would write to make the program. You should include a Makefile and a Dockerfile.
 
 Your repsonse must be JSON formatted and contain the following keys:
 "reasoning": a list of strings that explain your chain of thought (include 5-10)
-"filepaths": a list of strings that are the filepaths that the user would write to make the program
+"filepaths": a list of strings that are the filepaths that the user would write to make the program.
+
+Do not emit any other output.
 `
 
 const sharedDependenciesPrompt = `
@@ -202,10 +252,12 @@ Please name and briefly describe what is shared between the files we are generat
 
 Your repsonse must be JSON formatted and contain the following keys:
 "reasoning": a list of strings that explain your chain of thought (include 5-10)
-"shared_dependencies": a list of strings that are the filepaths that the user would write to make the program
+"shared_dependencies": a list of strings that are the filepaths that the user would write to make the program.
+
+Do not emit any other output.
 `
 
-const codeGenerationPrompt = `
+const codeGenerationSystemPrompt = `
 You are an AI developer who is trying to write a program that will generate code for the user based on their intent.
 
 the app is: {{.prompt}}
@@ -216,3 +268,24 @@ the shared dependencies (like filenames and variable names) we have decided on a
 
 only write valid code for the given filepath and file type, and return only the code.
 do not add any other explanation, only return valid code for that file type.`
+
+const codeGenerationPrompt = `
+We have broken up the program into per-file generation.
+Now your job is to generate only the code for the file {{.filename}}.
+Make sure to have consistent filenames if you reference other files we are also generating.
+
+Remember that you must obey 3 things:
+   - you are generating code for the file {{filename}}
+   - do not stray from the names of the files and the shared dependencies we have decided on
+   - MOST IMPORTANT OF ALL - the purpose of our app is {{.prompt}} - every line of code you generate must be valid code. Do not include code fences in your response, for example
+
+Bad response:
+` + "```" + `javascript
+console.log("hello world")
+` + "```" + `
+
+Good response:
+console.log("hello world")
+
+Begin generating the code now.
+`
