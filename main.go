@@ -104,8 +104,9 @@ func run() error {
 		})
 		time.Sleep(time.Millisecond)
 	}
+	err = g.Wait()
 	progressBars.Wait()
-	return g.Wait()
+	return err
 }
 
 func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, error) {
@@ -376,5 +377,5 @@ console.log("hello world")
 Good response:
 console.log("hello world")
 
-Begin generating the code now.
+Begin generating the specified file now (with surrounding text):
 `
