@@ -1,3 +1,4 @@
+// Command smol-dev-go is a software program that utilizes an AI model to generate complete code projects based on user prompts. The program takes user input, processes it, and produces a list of file paths, shared dependencies, and actual code for those files, all of which are stored in a specified target directory.
 package main
 
 import (
@@ -26,6 +27,9 @@ var (
 	flagTargetDir   = flag.String("target-dir", "", "target directory to write files to")
 	flagConcurrency = flag.Int("concurrency", 5, "number of concurrent files to generate")
 	flagVerbose     = flag.Bool("verbose", false, "verbose output")
+
+	flagFilesToGenerate = flag.String("files-to-generate", "", "file path to a yaml file containing a list of files to generate")
+	flagSharedDeps      = flag.String("shared-deps", "", "file path to a yaml file containing a list of shared dependencies")
 )
 
 func main() {
@@ -42,27 +46,18 @@ func run() error {
 		return err
 	}
 
-	filePathsResult, err := runFilePathsLLMCall(prompt)
+	filesToGenerate, err := getFilesToGenerate(prompt, *flagFilesToGenerate)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get files to generate: %w", err)
 	}
 
-	if *flagVerbose {
-		y, _ := json.MarshalIndent(filePathsResult, "", "  ")
-		fmt.Println(string(y))
-	}
-
-	sharedDeps, err := runSharedDependenciesLLMCall(prompt, filePathsResult.Filepaths)
+	sharedDeps, err := getSharedDependencies(prompt, filesToGenerate, *flagSharedDeps)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get shared dependencies: %w", err)
 	}
-
-	sharedDepsYaml, err := yaml.Marshal(sharedDeps.SharedDependencies)
-	if err := os.WriteFile(pathInTargetDir("shared_dependencies.md"), sharedDepsYaml, 0644); err != nil {
-		return fmt.Errorf("failed to write shared dependencies: %w", err)
-	}
-	if *flagVerbose {
-		fmt.Println(string(sharedDepsYaml))
+	sharedDepsYaml, err := yaml.Marshal(sharedDeps)
+	if err != nil {
+		return fmt.Errorf("failed to marshal shared dependencies: %w", err)
 	}
 
 	g := new(errgroup.Group)
@@ -70,11 +65,17 @@ func run() error {
 	// generate all files:
 
 	progressBars := mpb.New()
-	for i, fp := range filePathsResult.Filepaths {
+	for i, fp := range filesToGenerate {
 		i := i
 		fp := pathInTargetDir(fp)
+
+		// check if already exists:
+		if _, err := os.Stat(fp); err == nil {
+			fmt.Printf("file %v already exists, skipping\n", fp)
+			continue
+		}
 		g.Go(func() error {
-			msg := fmt.Sprintf("generating file %v of %v: %v", i+1, len(filePathsResult.Filepaths), fp)
+			msg := fmt.Sprintf("generating file %v of %v: %v", i+1, len(filesToGenerate), fp)
 			bar := progressBars.AddBar(1, mpb.PrependDecorators(
 				decor.Name(msg),
 			),
@@ -84,9 +85,10 @@ func run() error {
 				mpb.BarNoPop(),
 			)
 			defer bar.SetCurrent(1)
+			fmt.Println(msg)
 
 			// call codegen LLM:
-			src, err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filePathsResult.Filepaths)
+			src, err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filesToGenerate)
 			if err != nil {
 				return fmt.Errorf("failed to run codegen LLM call for %v: %w", fp, err)
 			}
@@ -104,6 +106,72 @@ func run() error {
 	}
 	progressBars.Wait()
 	return g.Wait()
+}
+
+func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, error) {
+	var result []string
+	var err error
+
+	if flagFilesToGenerate != "" {
+		result, err = readStringSliceFromYaml(flagFilesToGenerate)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		filePathsResult, err := runFilePathsLLMCall(prompt)
+		if err != nil {
+			return nil, err
+		}
+		result = filePathsResult.Filepaths
+	}
+	y, _ := yaml.Marshal(result)
+	if *flagVerbose {
+		fmt.Println(string(y))
+	}
+	if flagFilesToGenerate != "" {
+		if err := os.WriteFile(flagFilesToGenerate, y, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write files to generate file: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func getSharedDependencies(prompt string, filesToGenerate []string, flagSharedDeps string) ([]sharedDependency, error) {
+	var result []sharedDependency
+	var err error
+
+	if flagSharedDeps != "" {
+		result, err = readSharedDependenciesFromYaml(flagSharedDeps)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		sharedDepsResult, err := runSharedDependenciesLLMCall(prompt, filesToGenerate)
+		if err != nil {
+			return nil, err
+		}
+		result = sharedDepsResult.SharedDependencies
+	}
+	y, _ := yaml.Marshal(result)
+	if *flagVerbose {
+		fmt.Println(string(y))
+	}
+	if flagSharedDeps != "" {
+		if err := os.WriteFile(flagSharedDeps, y, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write shared deps file: %w", err)
+		}
+	}
+	return result, nil
+}
+
+func readSharedDependenciesFromYaml(path string) ([]sharedDependency, error) {
+	result := []sharedDependency{}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open shared deps file: %w", err)
+	}
+	return result, yaml.NewDecoder(f).Decode(&result)
+
 }
 
 type filepathLLMResponse struct {
@@ -134,8 +202,14 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 }
 
 type sharedDependenciesLLMResponse struct {
-	Reasoning          []string `json:"reasoning"`
-	SharedDependencies []string `json:"shared_dependencies"`
+	Reasoning          []string           `json:"reasoning"`
+	SharedDependencies []sharedDependency `json:"shared_dependencies"`
+}
+
+type sharedDependency struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Symbols     []string `json:"symbols"`
 }
 
 func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDependenciesLLMResponse, error) {
@@ -201,8 +275,10 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 
 func pathInTargetDir(path string) string {
 	// ensure target dir exists:
-	if err := os.MkdirAll(*flagTargetDir, 0755); err != nil {
-		panic(fmt.Errorf("failed to create target directory %v: %w", *flagTargetDir, err))
+	if *flagTargetDir != "" {
+		if err := os.MkdirAll(*flagTargetDir, 0755); err != nil {
+			panic(fmt.Errorf("failed to create target directory %v: %w", *flagTargetDir, err))
+		}
 	}
 	return filepath.Join(*flagTargetDir, path)
 }
@@ -220,6 +296,15 @@ func readPrompt() (string, error) {
 		return string(b), nil
 	}
 	return *flagPrompt, nil
+}
+
+func readStringSliceFromYaml(path string) ([]string, error) {
+	var result []string
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	return result, yaml.NewDecoder(f).Decode(&result)
 }
 
 // extracts a json string from a string
@@ -256,7 +341,7 @@ Please name and briefly describe what is shared between the files we are generat
 
 Your repsonse must be JSON formatted and contain the following keys:
 "reasoning": a list of strings that explain your chain of thought (include 5-10)
-"shared_dependencies": a list of strings that are the filepaths that the user would write to make the program.
+"shared_dependencies": a the list of shared dependencies, include a symbol name, a description, and the set of symbols or files. use "name", "description", and "symbols" as the keys.
 
 Do not emit any other output.
 `
