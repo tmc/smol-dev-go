@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gopkg.in/yaml.v3"
 
+	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/openai"
 	"github.com/tmc/langchaingo/prompts"
 	"github.com/tmc/langchaingo/schema"
@@ -113,7 +114,7 @@ func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, er
 	var result []string
 	var err error
 
-	if flagFilesToGenerate != "" {
+	if flagFilesToGenerate != "" && existsAndNonEmpty(flagFilesToGenerate) {
 		result, err = readStringSliceFromYaml(flagFilesToGenerate)
 		if err != nil {
 			return nil, err
@@ -127,6 +128,7 @@ func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, er
 	}
 	y, _ := yaml.Marshal(result)
 	if *flagVerbose {
+		fmt.Println("files to generate:")
 		fmt.Println(string(y))
 	}
 	if flagFilesToGenerate != "" {
@@ -137,11 +139,21 @@ func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, er
 	return result, nil
 }
 
+func existsAndNonEmpty(fp string) bool {
+	if _, err := os.Stat(fp); err != nil {
+		return false
+	}
+	if fi, err := os.Stat(fp); err == nil && fi.Size() == 0 {
+		return false
+	}
+	return true
+}
+
 func getSharedDependencies(prompt string, filesToGenerate []string, flagSharedDeps string) ([]sharedDependency, error) {
 	var result []sharedDependency
 	var err error
 
-	if flagSharedDeps != "" {
+	if flagSharedDeps != "" && existsAndNonEmpty(flagSharedDeps) {
 		result, err = readSharedDependenciesFromYaml(flagSharedDeps)
 		if err != nil {
 			return nil, err
@@ -155,6 +167,7 @@ func getSharedDependencies(prompt string, filesToGenerate []string, flagSharedDe
 	}
 	y, _ := yaml.Marshal(result)
 	if *flagVerbose {
+		fmt.Println("shared dependencies:")
 		fmt.Println(string(y))
 	}
 	if flagSharedDeps != "" {
@@ -191,7 +204,11 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 	cr, err := llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: filesPathsPrompt},
 		&schema.HumanChatMessage{Text: prompt},
-	})
+	}, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+		fmt.Fprint(os.Stderr, string(chunk))
+		return nil
+	}))
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to chat: %w", err)
 	}
@@ -232,7 +249,10 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 	}
 	generation, err := llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: systemPrompt},
-	})
+	}, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
+		fmt.Fprint(os.Stderr, string(chunk))
+		return nil
+	}))
 	result := &sharedDependenciesLLMResponse{}
 	if err = json.Unmarshal(findJSON(generation.Message.Text), result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, generation.Message.Text)
