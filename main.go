@@ -28,6 +28,7 @@ var (
 	flagTargetDir   = flag.String("target-dir", "", "target directory to write files to")
 	flagConcurrency = flag.Int("concurrency", 5, "number of concurrent files to generate")
 	flagVerbose     = flag.Bool("verbose", false, "verbose output")
+	flagDebug       = flag.Bool("debug", false, "debug output (show prompts)")
 
 	flagFilesToGenerate = flag.String("files-to-generate", "", "file path to a yaml file containing a list of files to generate")
 	flagSharedDeps      = flag.String("shared-deps", "", "file path to a yaml file containing a list of shared dependencies")
@@ -88,18 +89,14 @@ func run() error {
 			defer bar.SetCurrent(1)
 			fmt.Println(msg)
 
-			// call codegen LLM:
-			src, err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filesToGenerate)
-			if err != nil {
-				return fmt.Errorf("failed to run codegen LLM call for %v: %w", fp, err)
-			}
 			// ensure directory exists:
 			if err := os.MkdirAll(filepath.Dir(fp), 0755); err != nil {
 				return fmt.Errorf("failed to create directory %v: %w", filepath.Dir(fp), err)
 			}
-			// write file:
-			if err := os.WriteFile(fp, []byte(src), 0644); err != nil {
-				return fmt.Errorf("failed to write file %v: %w", fp, err)
+			// call codegen LLM:
+			err := runCodeGenLLMCall(prompt, msg, fp, string(sharedDepsYaml), filesToGenerate)
+			if err != nil {
+				return fmt.Errorf("failed to run codegen LLM call for %v: %w", fp, err)
 			}
 			return nil
 		})
@@ -117,12 +114,12 @@ func getFilesToGenerate(prompt string, flagFilesToGenerate string) ([]string, er
 	if flagFilesToGenerate != "" && existsAndNonEmpty(flagFilesToGenerate) {
 		result, err = readStringSliceFromYaml(flagFilesToGenerate)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read files to generate from file: %w", err)
 		}
 	} else {
 		filePathsResult, err := runFilePathsLLMCall(prompt)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to run file paths LLM call: %w", err)
 		}
 		result = filePathsResult.Filepaths
 	}
@@ -156,12 +153,12 @@ func getSharedDependencies(prompt string, filesToGenerate []string, flagSharedDe
 	if flagSharedDeps != "" && existsAndNonEmpty(flagSharedDeps) {
 		result, err = readSharedDependenciesFromYaml(flagSharedDeps)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to read shared dependencies from yaml: %w", err)
 		}
 	} else {
 		sharedDepsResult, err := runSharedDependenciesLLMCall(prompt, filesToGenerate)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to run shared dependencies LLM call: %w", err)
 		}
 		result = sharedDepsResult.SharedDependencies
 	}
@@ -189,17 +186,26 @@ func readSharedDependenciesFromYaml(path string) ([]sharedDependency, error) {
 }
 
 type filepathLLMResponse struct {
-	Reasoning []string `json:"reasoning"`
 	Filepaths []string `json:"filepaths"`
+	Reasoning []string `json:"reasoning"`
 }
 
 func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 	defer fmt.Println()
-	defer spin("generating file list", "finished generating file list")()
+	if *flagVerbose {
+		fmt.Println("running file paths LLM call")
+	} else {
+		defer spin("generating file list", "finished generating file list")()
+	}
 	ctx := context.Background()
 	llm, err := openai.New(openai.WithModel(*flagModel))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create llm: %w", err)
+	}
+	if *flagDebug {
+		fmt.Println("debug mode enabled, dumping prompt")
+		fmt.Println(filesPathsPrompt)
+		fmt.Println(prompt)
 	}
 	cr, err := llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: filesPathsPrompt},
@@ -220,21 +226,28 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 }
 
 type sharedDependenciesLLMResponse struct {
-	Reasoning          []string           `json:"reasoning"`
 	SharedDependencies []sharedDependency `json:"shared_dependencies"`
+	Reasoning          []string           `json:"reasoning"`
 }
 
 type sharedDependency struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Symbols     []string `json:"symbols"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Symbols     map[string]string `json:"symbols"`
 }
 
 func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDependenciesLLMResponse, error) {
 	defer fmt.Println()
-	defer spin("generate dependencies list", "finished generating")()
+	if *flagVerbose {
+		fmt.Println("running file paths LLM call")
+	} else {
+		defer spin("generate dependencies list", "finished generating")()
+	}
 	ctx := context.Background()
-	pt := prompts.NewPromptTemplate(sharedDependenciesPrompt, []string{"prompt", "filepaths_string"})
+	pt := prompts.NewPromptTemplate(sharedDependenciesPrompt, []string{
+		"prompt", "filepaths_string",
+		"target_json",
+	})
 	llm, err := openai.New(openai.WithModel(*flagModel))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create llm: %w", err)
@@ -242,17 +255,30 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 	inputs := map[string]interface{}{
 		"prompt":           prompt,
 		"filepaths_string": filePaths,
+		"target_json": emptyJSON(&sharedDependenciesLLMResponse{
+			Reasoning: []string{},
+			SharedDependencies: []sharedDependency{
+				{
+					Name:        "example symbol",
+					Description: "example description",
+				},
+			},
+		}),
 	}
 	systemPrompt, err := pt.Format(inputs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to format prompt: %w", err)
 	}
+	fmt.Println(systemPrompt)
 	generation, err := llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: systemPrompt},
 	}, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
 		fmt.Fprint(os.Stderr, string(chunk))
 		return nil
 	}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get llm result: %w", err)
+	}
 	result := &sharedDependenciesLLMResponse{}
 	if err = json.Unmarshal(findJSON(generation.Message.Text), result); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, generation.Message.Text)
@@ -260,14 +286,14 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 	return result, nil
 }
 
-func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string) (string, error) {
+func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string) error {
 	//defer spin(msg, "wrote files")()
 	ctx := context.Background()
 	spt := prompts.NewPromptTemplate(codeGenerationSystemPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
 	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies", "filename"})
-	llm, err := openai.New()
+	llm, err := openai.New(openai.WithModel(*flagModel))
 	if err != nil {
-		return "", fmt.Errorf("failed to create llm: %w", err)
+		return fmt.Errorf("failed to create llm: %w", err)
 	}
 	inputs := map[string]interface{}{
 		"prompt":              prompt,
@@ -277,21 +303,31 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 	}
 	systemPrompt, err := spt.Format(inputs)
 	if err != nil {
-		return "", fmt.Errorf("failed to format system prompt: %w", err)
+		return fmt.Errorf("failed to format system prompt: %w", err)
 	}
 	genPrompt, err := pt.Format(inputs)
 	if err != nil {
-		return "", fmt.Errorf("failed to format prompt: %w", err)
+		return fmt.Errorf("failed to format prompt: %w", err)
 	}
 
-	generation, err := llm.Chat(ctx, []schema.ChatMessage{
+	// open file for writing:
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open file %v: %w", file, err)
+	}
+	defer f.Close()
+	_, err = llm.Chat(ctx, []schema.ChatMessage{
 		&schema.SystemChatMessage{Text: systemPrompt},
 		&schema.HumanChatMessage{Text: genPrompt},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to chat: %w", err)
-	}
-	return generation.Message.Text, nil
+	}, llms.WithModel(*flagModel), llms.WithStreamingFunc(
+		// Stream writes to file:
+		func(ctx context.Context, chunk []byte) error {
+			if _, err := f.Write(chunk); err != nil {
+				return fmt.Errorf("failed to write to file %v: %w", file, err)
+			}
+			return f.Sync()
+		}))
+	return err
 }
 
 func pathInTargetDir(path string) string {
@@ -334,17 +370,21 @@ func findJSON(s string) []byte {
 	return re.Find([]byte(s))
 }
 
+func emptyJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
 const filesPathsPrompt = `
 You are an AI developer who is trying to write a program that will generate code for the user based on their intent.
 
 When given their intent, create a complete, exhaustive list of filepaths that the user would write to make the program. You should include a Makefile and a Dockerfile.
 
 Your repsonse must be JSON formatted and contain the following keys:
-"reasoning": a list of strings that explain your chain of thought (include 5-10)
 "filepaths": a list of strings that are the filepaths that the user would write to make the program.
+"reasoning": a list of strings that explain your chain of thought (include 5-10)
 
-Do not emit any other output.
-`
+Do not emit any other output.`
 
 const sharedDependenciesPrompt = `
 You are an AI developer who is trying to write a program that will generate code for the user based on their intent.
@@ -361,11 +401,14 @@ Now that we have a list of files, we need to understand what dependencies they s
 Please name and briefly describe what is shared between the files we are generating, including exported variables, data schemas, id names of every DOM elements that javascript functions will use, message names, and function names.
 
 Your repsonse must be JSON formatted and contain the following keys:
-"reasoning": a list of strings that explain your chain of thought (include 5-10)
 "shared_dependencies": a the list of shared dependencies, include a symbol name, a description, and the set of symbols or files. use "name", "description", and "symbols" as the keys.
+"reasoning": a list of strings that explain your chain of thought (include 5-10).
+The symbols should be a map of symbol name to symbol description.
 
-Do not emit any other output.
-`
+Your output should be JSON should look like:
+{{.target_json}}
+
+Do not emit any other output.`
 
 const codeGenerationSystemPrompt = `
 You are an AI developer who is trying to write a program that will generate code for the user based on their intent.
