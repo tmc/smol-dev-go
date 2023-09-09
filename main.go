@@ -198,7 +198,7 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 		defer spin("generating file list", "finished generating file list")()
 	}
 	ctx := context.Background()
-	llm, err := openai.New(openai.WithModel(*flagModel))
+	llm, err := openai.NewChat(openai.WithModel(*flagModel))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create llm: %w", err)
 	}
@@ -207,9 +207,9 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 		fmt.Println(filesPathsPrompt)
 		fmt.Println(prompt)
 	}
-	cr, err := llm.Chat(ctx, []schema.ChatMessage{
-		&schema.SystemChatMessage{Text: filesPathsPrompt},
-		&schema.HumanChatMessage{Text: prompt},
+	cr, err := llm.Call(ctx, []schema.ChatMessage{
+		&schema.SystemChatMessage{Content: filesPathsPrompt},
+		&schema.HumanChatMessage{Content: prompt},
 	}, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
 		fmt.Fprint(os.Stderr, string(chunk))
 		return nil
@@ -219,8 +219,8 @@ func runFilePathsLLMCall(prompt string) (*filepathLLMResponse, error) {
 		return nil, fmt.Errorf("failed to chat: %w", err)
 	}
 	result := &filepathLLMResponse{}
-	if err = json.Unmarshal(findJSON(cr.Message.Text), result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, cr.Message.Text)
+	if err = json.Unmarshal(findJSON(cr.Content), result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, cr.Content)
 	}
 	return result, nil
 }
@@ -248,7 +248,7 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 		"prompt", "filepaths_string",
 		"target_json",
 	})
-	llm, err := openai.New(openai.WithModel(*flagModel))
+	llm, err := openai.NewChat(openai.WithModel(*flagModel))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create llm: %w", err)
 	}
@@ -270,8 +270,8 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 		return nil, fmt.Errorf("failed to format prompt: %w", err)
 	}
 	fmt.Println(systemPrompt)
-	generation, err := llm.Chat(ctx, []schema.ChatMessage{
-		&schema.SystemChatMessage{Text: systemPrompt},
+	generation, err := llm.Call(ctx, []schema.ChatMessage{
+		&schema.SystemChatMessage{Content: systemPrompt},
 	}, llms.WithStreamingFunc(func(ctx context.Context, chunk []byte) error {
 		fmt.Fprint(os.Stderr, string(chunk))
 		return nil
@@ -280,8 +280,8 @@ func runSharedDependenciesLLMCall(prompt string, filePaths []string) (*sharedDep
 		return nil, fmt.Errorf("failed to get llm result: %w", err)
 	}
 	result := &sharedDependenciesLLMResponse{}
-	if err = json.Unmarshal(findJSON(generation.Message.Text), result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, generation.Message.Text)
+	if err = json.Unmarshal(findJSON(generation.Content), result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w\nRaw output: %v", err, generation.Content)
 	}
 	return result, nil
 }
@@ -291,7 +291,7 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 	ctx := context.Background()
 	spt := prompts.NewPromptTemplate(codeGenerationSystemPrompt, []string{"prompt", "filepaths_string", "shared_dependencies"})
 	pt := prompts.NewPromptTemplate(codeGenerationPrompt, []string{"prompt", "filepaths_string", "shared_dependencies", "filename"})
-	llm, err := openai.New(openai.WithModel(*flagModel))
+	llm, err := openai.NewChat(openai.WithModel(*flagModel))
 	if err != nil {
 		return fmt.Errorf("failed to create llm: %w", err)
 	}
@@ -316,9 +316,9 @@ func runCodeGenLLMCall(prompt, msg, file, sharedDeps string, filePaths []string)
 		return fmt.Errorf("failed to open file %v: %w", file, err)
 	}
 	defer f.Close()
-	_, err = llm.Chat(ctx, []schema.ChatMessage{
-		&schema.SystemChatMessage{Text: systemPrompt},
-		&schema.HumanChatMessage{Text: genPrompt},
+	_, err = llm.Call(ctx, []schema.ChatMessage{
+		&schema.SystemChatMessage{Content: systemPrompt},
+		&schema.HumanChatMessage{Content: genPrompt},
 	}, llms.WithModel(*flagModel), llms.WithStreamingFunc(
 		// Stream writes to file:
 		func(ctx context.Context, chunk []byte) error {

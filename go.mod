@@ -4,9 +4,9 @@ go 1.20
 
 require (
 	github.com/briandowns/spinner v1.23.0
-	github.com/tmc/langchaingo v0.0.0-20230713201705-dcf7ecdc8ac8
+	github.com/tmc/langchaingo v0.0.0-20230829032728-c85d3967da08
 	github.com/vbauerster/mpb/v8 v8.4.0
-	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
+	golang.org/x/sync v0.2.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -31,7 +31,7 @@ require (
 	github.com/shopspring/decimal v1.2.0 // indirect
 	github.com/spf13/cast v1.3.1 // indirect
 	golang.org/x/crypto v0.9.0 // indirect
-	golang.org/x/exp v0.0.0-20220303212507-bbda1eaf7a17 // indirect
+	golang.org/x/exp v0.0.0-20230510235704-dd950f8aeaea // indirect
 	golang.org/x/sys v0.8.0 // indirect
 	golang.org/x/term v0.8.0 // indirect
 )
